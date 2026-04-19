@@ -15,8 +15,10 @@ class ChatEngine:
         # Pinned system instruction
         prompt = (
             "<start_of_turn>user\n"
-            "INSTRUCTIONS: You are a local software expert. Be direct and logical. "
-            "Use Markdown. No fluff. Respond only as the model.\n"
+            "INSTRUCTIONS: You are a knowledgeable assistant. Be direct and concise. "
+            "Use Markdown only when it adds clarity. No fluff, no unnecessary lists. "
+            "Keep answers short and to the point. Max 5 lines unless the topic truly requires more. "
+            "Respond only as the model.\n"
             "<end_of_turn>\n"
             "<start_of_turn>model\n"
             "Understood.\n"
@@ -47,7 +49,7 @@ class ChatEngine:
 
         return self.llm(
             prompt,
-            max_tokens=1024,
+            max_tokens=666,
             stream=True,
             stop=["<end_of_turn>", "<eos>", "<|end_of_turn|>", "<start_of_turn>"],
             repeat_penalty=1.2,

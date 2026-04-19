@@ -55,7 +55,7 @@ while True:
                 continue
 
         console.print("[bold blue]assistant:[/bold blue]")
-        with Live(console=console, refresh_per_second=10) as live:
+        with Live(Markdown(full_response), console=console, refresh_per_second=5, vertical_overflow="visible") as live:
             for chunk in stream:
                 full_response += chunk['choices'][0]['text']
                 live.update(Markdown(full_response))
