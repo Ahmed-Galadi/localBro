@@ -29,6 +29,18 @@ COMPRESS_AFTER = 3
 with console.status("[bold yellow]Loading model...", spinner="dots"):
     engine = ChatEngine(CHAT_MODEL)
 
+# ---------------- Warmup inference (CPU/GPU agnostic) ----------------
+with console.status("[bold yellow]Warming up (first inference)...", spinner="dots"):
+    # A dummy prompt that forces internal state initialization
+    warmup_messages = [{"role": "user", "content": "Hi"}]
+    warmup_stream = engine.generate_response(warmup_messages)
+    # Consume a few tokens to fully exercise the pipeline
+    for _ in range(5):
+        try:
+            next(warmup_stream)
+        except StopIteration:
+            break
+
 console.clear()
 console.print("[bold cyan]❯ Terminal Online.[/bold cyan]")
 
