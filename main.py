@@ -79,6 +79,9 @@ while True:
         stop_streaming.clear()
         q = queue.Queue(maxsize=200)
 
+        # Start timing the response generation
+        start_time = time.time()
+
         stream = engine.generate_response(chat_history)
         worker = threading.Thread(
             target=stream_worker,
@@ -136,7 +139,9 @@ while True:
         if stop_streaming.is_set():
             console.print("[yellow]⚠ Response interrupted (Ctrl+C)[/yellow]")
 
-        console.print(f"[dim]Time: {time.time():.2f}s[/dim]")
+        # Show elapsed time in seconds (human‑readable duration)
+        elapsed = time.time() - start_time
+        console.print(f"[dim]Time: {elapsed:.2f}s[/dim]")
 
         chat_history.append({"role": "model", "content": full_response})
         exchanges += 1

@@ -9,8 +9,8 @@ NC='\033[0m'
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo -e "${CYAN}❯ LocalBro Installer (Vulkan AMD RX 470 — Safe Fallback v2)${NC}"
-echo -e "${CYAN}──────────────────────${NC}"
+echo -e "${CYAN}❯ LocalBro Installer (Multi‑GPU Auto‑Detection)${NC}"
+echo -e "${CYAN}────────────────────────────────────────────${NC}"
 
 # ── 1. Python check ──────────────────────────────────────────────────────────
 if ! command -v python3 &>/dev/null; then
@@ -33,47 +33,81 @@ fi
 source "$INSTALL_DIR/venv/bin/activate"
 pip install --upgrade pip --quiet
 
-# ── 4. Vulkan detection (runtime + headers + glslc) ──────────────────────────
+# ── 3. OS & GPU Detection ─────────────────────────────────────────────────────
+OS_TYPE=$(uname -s)
 LLAMA_BUILD_FLAGS=""
-if command -v vulkaninfo &>/dev/null && vulkaninfo --summary 2>/dev/null | grep -q "AMD Radeon RX"; then
-    if [ -f /usr/include/vulkan/vulkan.h ] && command -v glslc &>/dev/null; then
-        echo -e "${YELLOW}⚡ Vulkan AMD GPU + glslc detected — building with GPU support${NC}"
-        LLAMA_BUILD_FLAGS="CMAKE_ARGS='-DGGML_VULKAN=on' FORCE_CMAKE=1"
-    else
-        echo -e "${YELLOW}⚠ Vulkan runtime found but glslc is missing${NC}"
-        echo -e "${YELLOW}   → Building CPU-only (safe)${NC}"
-        echo -e "${YELLOW}   To enable GPU later, run this once:${NC}"
-        echo -e "${YELLOW}   sudo apt install glslc libvulkan-dev${NC}"
-    fi
+BACKEND_NAME="CPU"
+
+if [[ "$OS_TYPE" == "Darwin" ]]; then
+    # macOS – always enable Metal (works on Apple Silicon and Intel + AMD GPU Macs)
+    echo -e "${YELLOW} macOS detected — enabling Metal support${NC}"
+    LLAMA_BUILD_FLAGS="CMAKE_ARGS='-DGGML_METAL=on' FORCE_CMAKE=1"
+    BACKEND_NAME="Metal"
 else
-    echo -e "${YELLOW}⚠ No Vulkan AMD GPU detected — CPU-only${NC}"
+    # Linux (and other Unix‑like)
+    # Check for NVIDIA GPU + CUDA toolkit
+    if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null; then
+        if command -v nvcc &>/dev/null; then
+            echo -e "${YELLOW}⚡ NVIDIA GPU + CUDA toolkit detected — building with CUDA${NC}"
+            LLAMA_BUILD_FLAGS="CMAKE_ARGS='-DGGML_CUDA=on' FORCE_CMAKE=1"
+            BACKEND_NAME="CUDA"
+        else
+            echo -e "${YELLOW}⚠ NVIDIA GPU found but CUDA toolkit (nvcc) missing${NC}"
+            echo -e "${YELLOW}   → Falling back to Vulkan if possible${NC}"
+        fi
+    fi
+
+    # If no CUDA, try Vulkan (works on AMD and NVIDIA)
+    if [[ -z "$LLAMA_BUILD_FLAGS" ]]; then
+        if command -v vulkaninfo &>/dev/null && vulkaninfo --summary 2>/dev/null | grep -q "deviceName"; then
+            # Check for glslc (shader compiler) – required for Vulkan build
+            if command -v glslc &>/dev/null && [ -f /usr/include/vulkan/vulkan.h ]; then
+                echo -e "${YELLOW}⚡ Vulkan‑capable GPU + glslc detected — building with Vulkan${NC}"
+                LLAMA_BUILD_FLAGS="CMAKE_ARGS='-DGGML_VULKAN=on' FORCE_CMAKE=1"
+                BACKEND_NAME="Vulkan"
+            else
+                echo -e "${YELLOW}⚠ Vulkan runtime found but glslc or vulkan headers are missing${NC}"
+                echo -e "${YELLOW}   → Building CPU‑only (safe)${NC}"
+                echo -e "${YELLOW}   To enable Vulkan later, run:${NC}"
+                echo -e "${YELLOW}   sudo apt install glslc libvulkan-dev   # Debian/Ubuntu${NC}"
+            fi
+        fi
+    fi
 fi
 
-# ── 3.1 Compiler detection ───────────────────────────────────────────────────
-unset CC
-unset CXX
-for candidate in gcc-13 gcc-12 gcc-11 gcc; do
-    if command -v "$candidate" &>/dev/null; then
-        export CC="$candidate"
-        break
-    fi
-done
-for candidate in g++-13 g++-12 g++-11 g++; do
-    if command -v "$candidate" &>/dev/null; then
-        export CXX="$candidate"
-        break
-    fi
-done
-echo -e "${GREEN}✓ Using compiler: $CC / $CXX${NC}"
+if [[ -z "$LLAMA_BUILD_FLAGS" ]]; then
+    echo -e "${YELLOW}⚠ No compatible GPU acceleration detected — CPU‑only build${NC}"
+    BACKEND_NAME="CPU"
+fi
+
+# ── 4. Compiler selection (Linux only) ───────────────────────────────────────
+unset CC CXX
+if [[ "$OS_TYPE" != "Darwin" ]]; then
+    for candidate in gcc-13 gcc-12 gcc-11 gcc; do
+        if command -v "$candidate" &>/dev/null; then
+            export CC="$candidate"
+            break
+        fi
+    done
+    for candidate in g++-13 g++-12 g++-11 g++; do
+        if command -v "$candidate" &>/dev/null; then
+            export CXX="$candidate"
+            break
+        fi
+    done
+    echo -e "${GREEN}✓ Using compiler: ${CC:-default} / ${CXX:-default}${NC}"
+fi
 
 # ── 5. Install dependencies ───────────────────────────────────────────────────
-echo -e "${CYAN}❯ Installing dependencies...${NC}"
+echo -e "${CYAN}❯ Installing dependencies (backend: ${BACKEND_NAME})...${NC}"
 
+# Try pre‑built wheel first (may already have desired backend)
 if pip install llama-cpp-python --only-binary=:all: --quiet 2>/dev/null; then
-    echo -e "${GREEN}✓ Installed pre-built llama-cpp-python (no compile)${NC}"
+    echo -e "${GREEN}✓ Installed pre‑built llama-cpp-python (no compilation)${NC}"
+    # Note: pre‑built wheels often have Metal on macOS, but CUDA/Vulkan usually not.
 else
-    echo -e "${YELLOW}⚠ No pre-built wheel — building from source...${NC}"
-    if [ -n "$LLAMA_BUILD_FLAGS" ]; then
+    echo -e "${YELLOW}⚠ No suitable pre‑built wheel — building from source with ${BACKEND_NAME} support...${NC}"
+    if [[ -n "$LLAMA_BUILD_FLAGS" ]]; then
         eval "$LLAMA_BUILD_FLAGS pip install llama-cpp-python --upgrade --no-cache-dir"
     else
         pip install llama-cpp-python --upgrade --no-cache-dir
@@ -133,5 +167,6 @@ fi
 # ── 8. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}✓ Installation complete!${NC}"
+echo -e "  GPU backend used: ${CYAN}${BACKEND_NAME}${NC}"
 echo -e "  Run ${CYAN}./run.sh${NC} or ${CYAN}localbro${NC} (if installed globally)"
 echo -e "  Models are in: ${CYAN}$INSTALL_DIR/models/${NC}"
