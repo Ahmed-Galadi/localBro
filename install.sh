@@ -35,42 +35,28 @@ source "$INSTALL_DIR/venv/bin/activate"
 # ── 3. Pip upgrade ────────────────────────────────────────────────────────────
 pip install --upgrade pip --quiet
 
-# ── 3.1 Compiler sanity checks ─────────────────────────────────────────────────
-# Some environments export CC/CXX values that don't exist on the host.
-# llama-cpp-python falls back to a source build when needed, so ensure a working
-# compiler command is available before pip install.
-resolve_compiler() {
-    local var_name="$1"
-    shift
-    local current_value="${!var_name}"
+# ── 3.1 Compiler detection (FIXED, no version assumptions) ────────────────────
+unset CC
+unset CXX
 
-    if [ -n "$current_value" ] && command -v "$current_value" &>/dev/null; then
-        return
+# Prefer newer compilers if available
+for candidate in gcc-13 gcc-12 gcc-11 gcc; do
+    if command -v "$candidate" &>/dev/null; then
+        export CC="$candidate"
+        break
     fi
+done
 
-    if [ -n "$current_value" ]; then
-        echo -e "${YELLOW}⚠ $var_name='$current_value' not found — selecting a fallback${NC}"
+for candidate in g++-13 g++-12 g++-11 g++; do
+    if command -v "$candidate" &>/dev/null; then
+        export CXX="$candidate"
+        break
     fi
+done
 
-    for candidate in "$@"; do
-        if command -v "$candidate" &>/dev/null; then
-            printf -v "$var_name" '%s' "$candidate"
-            export "$var_name"
-            return
-        fi
-    done
-
-    echo -e "${RED}✗ No usable compiler found for $var_name. Install build tools and retry.${NC}"
-    exit 1
-}
-
-resolve_compiler CC gcc cc clang
-resolve_compiler CXX g++ c++ clang++
+echo -e "${GREEN}✓ Using compiler: $CC / $CXX${NC}"
 
 # ── 4. llama-cpp-python — GPU hint ───────────────────────────────────────────
-# Detect CUDA so we can offer a GPU-accelerated build.
-# You can override by setting LLAMA_BUILD_FLAGS before running this script.
-# Example: LLAMA_BUILD_FLAGS="CMAKE_ARGS='-DGGML_CUDA=on'" ./install.sh
 if [ -z "$LLAMA_BUILD_FLAGS" ] && command -v nvcc &>/dev/null; then
     echo -e "${YELLOW}⚡ CUDA detected — building llama-cpp-python with GPU support${NC}"
     LLAMA_BUILD_FLAGS="CMAKE_ARGS='-DGGML_CUDA=on' FORCE_CMAKE=1"
@@ -78,12 +64,21 @@ fi
 
 # ── 5. Install dependencies ───────────────────────────────────────────────────
 echo -e "${CYAN}❯ Installing dependencies...${NC}"
-if [ -n "$LLAMA_BUILD_FLAGS" ]; then
-    eval "$LLAMA_BUILD_FLAGS pip install llama-cpp-python --upgrade"
-    pip install rich --quiet
+
+# Try prebuilt wheel FIRST (no compilation)
+if pip install llama-cpp-python --only-binary=:all: --quiet 2>/dev/null; then
+    echo -e "${GREEN}✓ Installed pre-built llama-cpp-python (no compile)${NC}"
 else
-    pip install -r "$INSTALL_DIR/requirements.txt" --quiet
+    echo -e "${YELLOW}⚠ No pre-built wheel — building from source...${NC}"
+    if [ -n "$LLAMA_BUILD_FLAGS" ]; then
+        eval "$LLAMA_BUILD_FLAGS pip install llama-cpp-python --upgrade"
+    else
+        pip install llama-cpp-python --upgrade
+    fi
 fi
+
+pip install rich --quiet
+
 echo -e "${GREEN}✓ Dependencies installed${NC}"
 
 # ── 6. Download models ───────────────────────────────────────────────────────
@@ -116,23 +111,27 @@ download_model \
     "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf" \
     "$QWEN" "380MB"
 
-# ── 7. Register `localbro` command ────────────────────────────────────────────
+# ── 7. Register command (OPTIONAL sudo) ──────────────────────────────────────
 LAUNCHER="/usr/local/bin/localbro"
 
-echo -e "${CYAN}❯ Registering 'localbro' command (may ask for sudo)...${NC}"
+echo -e "${CYAN}❯ Register global command? (optional)${NC}"
+read -p "Install 'localbro' globally? [y/N]: " choice
 
-sudo tee "$LAUNCHER" > /dev/null << EOF
+if [[ "$choice" =~ ^[Yy]$ ]]; then
+    sudo tee "$LAUNCHER" > /dev/null << EOF
 #!/bin/bash
 source "$INSTALL_DIR/venv/bin/activate"
 cd "$INSTALL_DIR"
 exec python3 "$INSTALL_DIR/main.py" "\$@"
 EOF
-
-sudo chmod +x "$LAUNCHER"
-echo -e "${GREEN}✓ 'localbro' registered at $LAUNCHER${NC}"
+    sudo chmod +x "$LAUNCHER"
+    echo -e "${GREEN}✓ 'localbro' registered globally${NC}"
+else
+    echo -e "${YELLOW}⚠ Skipped global install. Use ./run.sh instead.${NC}"
+fi
 
 # ── 8. Done ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}✓ Installation complete!${NC}"
-echo -e "  Run ${CYAN}localbro${NC} from any terminal to start."
-echo -e "  Models are ready in: ${CYAN}$INSTALL_DIR/models/${NC}"
+echo -e "  Run ${CYAN}./run.sh${NC} or ${CYAN}localbro${NC} (if installed globally)"
+echo -e "  Models are in: ${CYAN}$INSTALL_DIR/models/${NC}"
