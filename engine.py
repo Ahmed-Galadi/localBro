@@ -6,8 +6,9 @@ class ChatEngine:
         self.llm = Llama(
             model_path=model_path,
             n_ctx=4096,
-            n_threads=6,
-            n_threads_batch=6,
+            n_threads=4,
+            n_threads_batch=4,
+            n_gpu_layers=-1,
             verbose=False
         )
 
@@ -17,7 +18,8 @@ class ChatEngine:
             "<start_of_turn>user\n"
             "INSTRUCTIONS: You are a knowledgeable assistant. Be direct and concise. "
             "Use Markdown only when it adds clarity. No fluff, no unnecessary lists. "
-            "Keep answers short and to the point. Max 5 lines unless the topic truly requires more. "
+            "Do not use TEX when answering. "
+            "Keep answers short and to the point. Max 15 lines unless the topic truly requires more. "
             "Respond only as the model.\n"
             "<end_of_turn>\n"
             "<start_of_turn>model\n"
@@ -49,7 +51,7 @@ class ChatEngine:
 
         return self.llm(
             prompt,
-            max_tokens=666,
+            max_tokens=1024,
             stream=True,
             stop=["<end_of_turn>", "<eos>", "<|end_of_turn|>", "<start_of_turn>"],
             repeat_penalty=1.2,

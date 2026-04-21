@@ -9,7 +9,7 @@ NC='\033[0m'
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo -e "${CYAN}❯ LocalBro Installer${NC}"
+echo -e "${CYAN}❯ LocalBro Installer (Vulkan AMD RX 470 — Safe Fallback v2)${NC}"
 echo -e "${CYAN}──────────────────────${NC}"
 
 # ── 1. Python check ──────────────────────────────────────────────────────────
@@ -31,54 +31,56 @@ else
 fi
 
 source "$INSTALL_DIR/venv/bin/activate"
-
-# ── 3. Pip upgrade ────────────────────────────────────────────────────────────
 pip install --upgrade pip --quiet
 
-# ── 3.1 Compiler detection (FIXED, no version assumptions) ────────────────────
+# ── 4. Vulkan detection (runtime + headers + glslc) ──────────────────────────
+LLAMA_BUILD_FLAGS=""
+if command -v vulkaninfo &>/dev/null && vulkaninfo --summary 2>/dev/null | grep -q "AMD Radeon RX"; then
+    if [ -f /usr/include/vulkan/vulkan.h ] && command -v glslc &>/dev/null; then
+        echo -e "${YELLOW}⚡ Vulkan AMD GPU + glslc detected — building with GPU support${NC}"
+        LLAMA_BUILD_FLAGS="CMAKE_ARGS='-DGGML_VULKAN=on' FORCE_CMAKE=1"
+    else
+        echo -e "${YELLOW}⚠ Vulkan runtime found but glslc is missing${NC}"
+        echo -e "${YELLOW}   → Building CPU-only (safe)${NC}"
+        echo -e "${YELLOW}   To enable GPU later, run this once:${NC}"
+        echo -e "${YELLOW}   sudo apt install glslc libvulkan-dev${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠ No Vulkan AMD GPU detected — CPU-only${NC}"
+fi
+
+# ── 3.1 Compiler detection ───────────────────────────────────────────────────
 unset CC
 unset CXX
-
-# Prefer newer compilers if available
 for candidate in gcc-13 gcc-12 gcc-11 gcc; do
     if command -v "$candidate" &>/dev/null; then
         export CC="$candidate"
         break
     fi
 done
-
 for candidate in g++-13 g++-12 g++-11 g++; do
     if command -v "$candidate" &>/dev/null; then
         export CXX="$candidate"
         break
     fi
 done
-
 echo -e "${GREEN}✓ Using compiler: $CC / $CXX${NC}"
-
-# ── 4. llama-cpp-python — GPU hint ───────────────────────────────────────────
-if [ -z "$LLAMA_BUILD_FLAGS" ] && command -v nvcc &>/dev/null; then
-    echo -e "${YELLOW}⚡ CUDA detected — building llama-cpp-python with GPU support${NC}"
-    LLAMA_BUILD_FLAGS="CMAKE_ARGS='-DGGML_CUDA=on' FORCE_CMAKE=1"
-fi
 
 # ── 5. Install dependencies ───────────────────────────────────────────────────
 echo -e "${CYAN}❯ Installing dependencies...${NC}"
 
-# Try prebuilt wheel FIRST (no compilation)
 if pip install llama-cpp-python --only-binary=:all: --quiet 2>/dev/null; then
     echo -e "${GREEN}✓ Installed pre-built llama-cpp-python (no compile)${NC}"
 else
     echo -e "${YELLOW}⚠ No pre-built wheel — building from source...${NC}"
     if [ -n "$LLAMA_BUILD_FLAGS" ]; then
-        eval "$LLAMA_BUILD_FLAGS pip install llama-cpp-python --upgrade"
+        eval "$LLAMA_BUILD_FLAGS pip install llama-cpp-python --upgrade --no-cache-dir"
     else
-        pip install llama-cpp-python --upgrade
+        pip install llama-cpp-python --upgrade --no-cache-dir
     fi
 fi
 
 pip install rich --quiet
-
 echo -e "${GREEN}✓ Dependencies installed${NC}"
 
 # ── 6. Download models ───────────────────────────────────────────────────────
@@ -111,12 +113,10 @@ download_model \
     "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf" \
     "$QWEN" "380MB"
 
-# ── 7. Register command (OPTIONAL sudo) ──────────────────────────────────────
+# ── 7. Register command (optional) ───────────────────────────────────────────
 LAUNCHER="/usr/local/bin/localbro"
-
 echo -e "${CYAN}❯ Register global command? (optional)${NC}"
 read -p "Install 'localbro' globally? [y/N]: " choice
-
 if [[ "$choice" =~ ^[Yy]$ ]]; then
     sudo tee "$LAUNCHER" > /dev/null << EOF
 #!/bin/bash
