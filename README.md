@@ -36,10 +36,11 @@ The installer will:
 
 1. Check your Python version
 2. Create a `venv/` virtual environment inside the project folder
-3. Detect CUDA and build `llama-cpp-python` with GPU support if available
-4. Install all dependencies from `requirements.txt`
-5. Create a `models/` directory if one doesn't exist
-6. Register `localbro` as a system-wide command at `/usr/local/bin/localbro`
+3. Validate compiler settings (`CC`/`CXX`) and auto-fallback to available system compilers
+4. Detect CUDA and build `llama-cpp-python` with GPU support if available
+5. Install all dependencies from `requirements.txt`
+6. Create a `models/` directory if one doesn't exist
+7. Register `localbro` as a system-wide command at `/usr/local/bin/localbro`
 
 > **GPU override:** If CUDA isn't auto-detected but you want GPU support, run:
 > ```bash

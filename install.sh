@@ -35,6 +35,37 @@ source "$INSTALL_DIR/venv/bin/activate"
 # ── 3. Pip upgrade ────────────────────────────────────────────────────────────
 pip install --upgrade pip --quiet
 
+# ── 3.1 Compiler sanity checks ─────────────────────────────────────────────────
+# Some environments export CC/CXX values that don't exist on the host.
+# llama-cpp-python falls back to a source build when needed, so ensure a working
+# compiler command is available before pip install.
+resolve_compiler() {
+    local var_name="$1"
+    shift
+    local current_value="${!var_name}"
+
+    if [ -n "$current_value" ] && command -v "$current_value" &>/dev/null; then
+        return
+    fi
+
+    if [ -n "$current_value" ]; then
+        echo -e "${YELLOW}⚠ $var_name='$current_value' not found — selecting a fallback${NC}"
+    fi
+
+    for candidate in "$@"; do
+        if command -v "$candidate" &>/dev/null; then
+            export "$var_name=$candidate"
+            return
+        fi
+    done
+
+    echo -e "${RED}✗ No usable compiler found for $var_name. Install build tools and retry.${NC}"
+    exit 1
+}
+
+resolve_compiler CC gcc cc clang
+resolve_compiler CXX g++ c++ clang++
+
 # ── 4. llama-cpp-python — GPU hint ───────────────────────────────────────────
 # Detect CUDA so we can offer a GPU-accelerated build.
 # You can override by setting LLAMA_BUILD_FLAGS before running this script.
