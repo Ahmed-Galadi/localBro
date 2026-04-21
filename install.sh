@@ -54,7 +54,8 @@ resolve_compiler() {
 
     for candidate in "$@"; do
         if command -v "$candidate" &>/dev/null; then
-            export "$var_name=$candidate"
+            printf -v "$var_name" '%s' "$candidate"
+            export "$var_name"
             return
         fi
     done
