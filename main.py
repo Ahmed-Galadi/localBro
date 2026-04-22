@@ -5,13 +5,15 @@ import signal
 import sys
 import termios
 import atexit
+import os
+import readline
+from multiprocessing import Process, Pipe
+
 from engine import ChatEngine
-from summarizer import compress
+from summarizer import background_summarizer
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.live import Live
-import os
-import readline
 
 GEMMA = "./models/gemma-4-E4B-it-Q4_K_M.gguf"
 QWEN  = "./models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
@@ -28,10 +30,22 @@ else:
     console.print("[red]No model found in ./models/ — run install.sh[/red]")
     exit(1)
 
-COMPRESS_AFTER = 3
+COMPRESS_AFTER = 4
 
 with console.status("[bold yellow]Loading model...", spinner="dots"):
     engine = ChatEngine(CHAT_MODEL)
+
+# ---------------- IPC Setup ----------------
+parent_conn, child_conn = Pipe()
+worker_process = None
+
+console.clear()
+console.print("[bold cyan]❯ Terminal Online (Twin-Engine Active).[/bold cyan]")
+
+chat_history = []
+exchanges = 0
+stop_streaming = threading.Event()
+exit_all = threading.Event()
 
 # ---------------- Warmup inference (CPU/GPU agnostic) ----------------
 with console.status("[bold yellow]Warming up (first inference)...", spinner="dots"):
@@ -99,82 +113,37 @@ while True:
         if exit_all.is_set():
             break
 
+        # Check if background summarizer finished
+        if parent_conn.poll():
+            new_summary = parent_conn.recv()
+            chat_history = [{"role": "context", "content": new_summary}]
+            console.print(f"[dim italic]Memory updated by Qwen: {new_summary[:50]}... ✓[/dim italic]")
+
         user_input = input("\n\033[1;32m❯ \033[0m").strip()
-        if not user_input:
-            continue
-        if user_input.lower() in ("exit", "quit"):
+        if not user_input or user_input.lower() in ("exit", "quit"):
             break
 
         chat_history.append({"role": "user", "content": user_input})
-
         stop_streaming.clear()
         q = queue.Queue(maxsize=200)
-
         start_time = time.time()
 
         stream = engine.generate_response(chat_history)
-        worker = threading.Thread(
-            target=stream_worker,
-            args=(stream, q, stop_streaming),
-            daemon=True
-        )
+        worker = threading.Thread(target=stream_worker, args=(stream, q, stop_streaming), daemon=True)
         worker.start()
 
         # ---------------- THINKING PHASE ----------------
         with console.status("[bold yellow]Thinking...[/bold yellow]", spinner="dots"):
             first_chunk = q.get()
 
-        if first_chunk is None:
+        if first_chunk is None or "__error__" in first_chunk:
             chat_history.pop()
             continue
 
-        if "__error__" in first_chunk:
-            console.print(f"[red]Error: {first_chunk['__error__']}[/red]")
-            chat_history.pop()
-            continue
-
-        full_response = first_chunk["choices"][0]["text"]
-
-        # ---------------- RESPONDING PHASE ----------------
-  #      console.print("[bold blue]assistant:[/bold blue]")
-
-   #     with Live(Markdown(full_response),
-    #              console=console,
-     #             refresh_per_second=10,
-      #            vertical_overflow="visible") as live:
-
-       #     while True:
-        #        if exit_all.is_set():
-         #           stop_streaming.set()
-          #          break
-
-           #     try:
-            #        chunk = q.get(timeout=0.1)
-             #   except queue.Empty:
-              #      if stop_streaming.is_set():
-               #         break
-                #    continue
-
-          #      if chunk is None:
-           #         break
-
-            #    if "__error__" in chunk:
-             #       console.print(f"[red]Error: {chunk['__error__']}[/red]")
-              #      break
-
-         #       full_response += chunk["choices"][0]["text"]
-          #      live.update(Markdown(full_response))
-        # ---------------- RESPONDING PHASE ----------------
-        # Use the alternate buffer (screen) to prevent scrollback corruption
+        # ---------------- RESPONDING PHASE (Alternate Buffer) ----------------
         with console.screen() as screen:
-            full_response = ""
-            
-            # We use Live inside the alternate buffer
-            with Live(Markdown(full_response), 
-                      console=console, 
-                      refresh_per_second=10, 
-                      vertical_overflow="visible") as live:
-                
+            full_response = first_chunk["choices"][0]["text"]
+            with Live(Markdown(full_response), console=console, refresh_per_second=10, vertical_overflow="visible") as live:
                 while True:
                     if exit_all.is_set():
                         stop_streaming.set()
@@ -182,23 +151,14 @@ while True:
                     try:
                         chunk = q.get(timeout=0.1)
                     except queue.Empty:
-                        if stop_streaming.is_set():
-                            break
+                        if stop_streaming.is_set(): break
                         continue
-                    if chunk is None:
-                        break
-                    
+                    if chunk is None: break
                     full_response += chunk["choices"][0]["text"]
                     live.update(Markdown(full_response))
 
-        # Once the 'with console.screen()' block ends, the terminal 
-        # automatically flips back to your main scroll history.
-        # Now we print the final, static version once.
         console.print("[bold blue]assistant:[/bold blue]")
         console.print(Markdown(full_response))
-        # ---------------- INTERRUPTION FEEDBACK ----------------
-        if stop_streaming.is_set():
-            console.print("[yellow]⚠ Response interrupted (Ctrl+C)[/yellow]")
 
         elapsed = time.time() - start_time
         console.print(f"[dim]Time: {elapsed:.2f}s[/dim]")
@@ -206,27 +166,20 @@ while True:
         chat_history.append({"role": "model", "content": full_response})
         exchanges += 1
 
-        # ---------------- MEMORY COMPRESSION ----------------
+        # ---------------- ASYNC MEMORY COMPRESSION ----------------
         if exchanges >= COMPRESS_AFTER:
-            old_summary = ""
-            if chat_history and chat_history[0]["role"] == "context":
-                old_summary = chat_history[0]["content"]
-
-            new_summary = compress(chat_history, old_summary)
-            chat_history = [{"role": "context", "content": new_summary}]
-            exchanges = 0
-
-            console.print("[dim italic]Memory compressed ✓[/dim italic]")
-
-        if exit_all.is_set():
-            break
+            if worker_process and worker_process.is_alive():
+                pass # Already summarizing
+            else:
+                worker_process = Process(target=background_summarizer, args=(child_conn, chat_history, QWEN))
+                worker_process.start()
+                exchanges = 0
 
     except EOFError:
         break
-
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
-        stop_streaming.set()
         continue
 
+if worker_process: worker_process.terminate()
 console.print("\n[bold cyan]Goodbye.[/bold cyan]")

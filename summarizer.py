@@ -1,19 +1,34 @@
-def compress(chat_history: list, old_summary: str = "") -> str:
+from engine import ChatEngine
+
+def background_summarizer(conn, chat_history, model_path):
     """
-    Keeps only user questions as memory — they carry all the context.
-    Assistant responses are discarded (long, noisy, not needed).
+    This function runs in a separate process.
+    It uses Qwen to generate a professional summary of the chat.
     """
-    new_questions = [
-        f"- {m['content']}"
-        for m in chat_history
-        if m['role'] == "user"
-    ]
+    try:
+        # Load Qwen inside the child process.
+        # We use low threads (2) to avoid starving Gemma of CPU cycles.
+        mem_engine = ChatEngine(model_path)
+        mem_engine.llm.n_threads = 2
+        mem_engine.llm.n_threads_batch = 2
 
-    old_lines = old_summary.strip().splitlines() if old_summary else []
+        # Extract only user questions to keep the summary focused
+        user_queries = [m['content'] for m in chat_history if m['role'] == "user"]
+        context_text = "\n".join(user_queries)
 
-    all_lines = old_lines + new_questions
+        prompt = [
+            {"role": "user", "content": f"Summarize the following topics discussed into a logical, 3-line summary of facts:\n\n{context_text}"}
+        ]
 
-    # Cap at 20 questions so context block never explodes
-    all_lines = all_lines[-20:]
+        # Generate the summary
+        stream = mem_engine.generate_response(prompt)
+        summary = ""
+        for chunk in stream:
+            summary += chunk["choices"][0]["text"]
 
-    return "Previous topics discussed:\n" + "\n".join(all_lines)
+        # Send back to the main process via Pipe
+        conn.send(summary.strip())
+    except Exception as e:
+        conn.send(f"Error during background compression: {e}")
+    finally:
+        conn.close()
