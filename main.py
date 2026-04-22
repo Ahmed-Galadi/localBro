@@ -2,12 +2,16 @@ import time
 import threading
 import queue
 import signal
+import sys
+import termios
+import atexit
 from engine import ChatEngine
 from summarizer import compress
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.live import Live
 import os
+import readline
 
 GEMMA = "./models/gemma-4-E4B-it-Q4_K_M.gguf"
 QWEN  = "./models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
@@ -31,10 +35,8 @@ with console.status("[bold yellow]Loading model...", spinner="dots"):
 
 # ---------------- Warmup inference (CPU/GPU agnostic) ----------------
 with console.status("[bold yellow]Warming up (first inference)...", spinner="dots"):
-    # A dummy prompt that forces internal state initialization
     warmup_messages = [{"role": "user", "content": "Hi"}]
     warmup_stream = engine.generate_response(warmup_messages)
-    # Consume a few tokens to fully exercise the pipeline
     for _ in range(5):
         try:
             next(warmup_stream)
@@ -51,12 +53,29 @@ exchanges = 0
 stop_streaming = threading.Event()
 exit_all = threading.Event()
 
+# ---------------- Suppress ^C / ^Z echo ----------------
+def _set_echoctl(enable: bool):
+    try:
+        fd = sys.stdin.fileno()
+        attrs = termios.tcgetattr(fd)
+        if enable:
+            attrs[3] |= termios.ECHOCTL
+        else:
+            attrs[3] &= ~termios.ECHOCTL
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except Exception:
+        pass
+
+_set_echoctl(False)
+atexit.register(_set_echoctl, True)
+
 def handle_sigint(signum, frame):
     stop_streaming.set()
 
 def handle_sigtstp(signum, frame):
     stop_streaming.set()
     exit_all.set()
+    _set_echoctl(True)
 
 signal.signal(signal.SIGINT, handle_sigint)    # Ctrl+C
 signal.signal(signal.SIGTSTP, handle_sigtstp)  # Ctrl+Z
@@ -80,7 +99,7 @@ while True:
         if exit_all.is_set():
             break
 
-        user_input = console.input("\n[bold green]❯ [/bold green]").strip()
+        user_input = input("\n\033[1;32m❯ \033[0m").strip()
         if not user_input:
             continue
         if user_input.lower() in ("exit", "quit"):
@@ -91,7 +110,6 @@ while True:
         stop_streaming.clear()
         q = queue.Queue(maxsize=200)
 
-        # Start timing the response generation
         start_time = time.time()
 
         stream = engine.generate_response(chat_history)
@@ -118,40 +136,70 @@ while True:
         full_response = first_chunk["choices"][0]["text"]
 
         # ---------------- RESPONDING PHASE ----------------
-        console.print("[bold blue]assistant:[/bold blue]")
+  #      console.print("[bold blue]assistant:[/bold blue]")
 
-        with Live(Markdown(full_response),
-                  console=console,
-                  refresh_per_second=10,
-                  vertical_overflow="visible") as live:
+   #     with Live(Markdown(full_response),
+    #              console=console,
+     #             refresh_per_second=10,
+      #            vertical_overflow="visible") as live:
 
-            while True:
-                if exit_all.is_set():
-                    stop_streaming.set()
-                    break
+       #     while True:
+        #        if exit_all.is_set():
+         #           stop_streaming.set()
+          #          break
 
-                try:
-                    chunk = q.get(timeout=0.1)
-                except queue.Empty:
-                    if stop_streaming.is_set():
+           #     try:
+            #        chunk = q.get(timeout=0.1)
+             #   except queue.Empty:
+              #      if stop_streaming.is_set():
+               #         break
+                #    continue
+
+          #      if chunk is None:
+           #         break
+
+            #    if "__error__" in chunk:
+             #       console.print(f"[red]Error: {chunk['__error__']}[/red]")
+              #      break
+
+         #       full_response += chunk["choices"][0]["text"]
+          #      live.update(Markdown(full_response))
+        # ---------------- RESPONDING PHASE ----------------
+        # Use the alternate buffer (screen) to prevent scrollback corruption
+        with console.screen() as screen:
+            full_response = ""
+            
+            # We use Live inside the alternate buffer
+            with Live(Markdown(full_response), 
+                      console=console, 
+                      refresh_per_second=10, 
+                      vertical_overflow="visible") as live:
+                
+                while True:
+                    if exit_all.is_set():
+                        stop_streaming.set()
                         break
-                    continue
+                    try:
+                        chunk = q.get(timeout=0.1)
+                    except queue.Empty:
+                        if stop_streaming.is_set():
+                            break
+                        continue
+                    if chunk is None:
+                        break
+                    
+                    full_response += chunk["choices"][0]["text"]
+                    live.update(Markdown(full_response))
 
-                if chunk is None:
-                    break
-
-                if "__error__" in chunk:
-                    console.print(f"[red]Error: {chunk['__error__']}[/red]")
-                    break
-
-                full_response += chunk["choices"][0]["text"]
-                live.update(Markdown(full_response))
-
+        # Once the 'with console.screen()' block ends, the terminal 
+        # automatically flips back to your main scroll history.
+        # Now we print the final, static version once.
+        console.print("[bold blue]assistant:[/bold blue]")
+        console.print(Markdown(full_response))
         # ---------------- INTERRUPTION FEEDBACK ----------------
         if stop_streaming.is_set():
             console.print("[yellow]⚠ Response interrupted (Ctrl+C)[/yellow]")
 
-        # Show elapsed time in seconds (human‑readable duration)
         elapsed = time.time() - start_time
         console.print(f"[dim]Time: {elapsed:.2f}s[/dim]")
 
