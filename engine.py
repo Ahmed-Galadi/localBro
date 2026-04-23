@@ -1,16 +1,26 @@
+import os
+import sys
 from llama_cpp import Llama
-
 
 class ChatEngine:
     def __init__(self, model_path: str):
-        self.llm = Llama(
-            model_path=model_path,
-            n_ctx=4096,
-            n_threads=6,
-            n_threads_batch=6,
-            n_gpu_layers=-1,
-            verbose=False
-        )
+        stderr_fd = sys.stderr.fileno()
+        with open(os.devnull, 'w') as devnull:
+            old_stderr = os.dup(stderr_fd)
+            os.dup2(devnull.fileno(), stderr_fd)
+            
+            try:
+                self.llm = Llama(
+                    model_path=model_path,
+                    n_ctx=4096,
+                    n_threads=4,
+                    n_threads_batch=4,
+                    n_gpu_layers=-1,
+                    verbose=False 
+                )
+            finally:
+                os.dup2(old_stderr, stderr_fd)
+                os.close(old_stderr)
 
     def generate_response(self, messages: list):
         # Pinned system instruction
@@ -18,12 +28,14 @@ class ChatEngine:
             "<start_of_turn>user\n"
             "INSTRUCTIONS: You are a knowledgeable offline assistant. "
             "Primary goals: Explain educational concepts clearly and assist with daily tasks. "
-            "Be direct, concise, and logical. Use Markdown for clarity. No TEX. No fluff. "
+            "Be direct, concise, and logical. Use Markdown for clarity. No fluff."
+            "STRICT RULE: NEVER use LaTeX, $, or backslashes for text. "
+            "STRICT RULE: No math formatting for plain text labels. "
             "Keep answers short and to the point. Max 20 lines unless complexity requires more. "
             "Respond only as the model.\n"
             "<end_of_turn>\n"
             "<start_of_turn>model\n"
-            "Understood.\n"
+            "Understood. I will avoid all LaTeX symbols.\n"
             "<end_of_turn>\n"
         )
 
@@ -45,7 +57,7 @@ class ChatEngine:
                 prompt += f"<start_of_turn>user\n{content}\n<end_of_turn>\n"
             else:  # "model"
                 prompt += f"<start_of_turn>model\n{content}\n<end_of_turn>\n"
-
+        prompt += "REMINDER: NEVER use LaTeX, $, or backslashes for text"
         prompt += "<start_of_turn>model\n"
 
         return self.llm(

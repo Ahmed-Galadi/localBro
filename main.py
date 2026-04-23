@@ -30,8 +30,6 @@ else:
     console.print("[red]No model found in ./models/ — run install.sh[/red]")
     exit(1)
 
-COMPRESS_AFTER = 4
-
 with console.status("[bold yellow]Loading model...", spinner="dots"):
     engine = ChatEngine(CHAT_MODEL)
 
@@ -41,11 +39,6 @@ worker_process = None
 
 console.clear()
 console.print("[bold cyan]❯ Terminal Online (Twin-Engine Active).[/bold cyan]")
-
-chat_history = []
-exchanges = 0
-stop_streaming = threading.Event()
-exit_all = threading.Event()
 
 # ---------------- Warmup inference (CPU/GPU agnostic) ----------------
 with console.status("[bold yellow]Warming up (first inference)...", spinner="dots"):
@@ -61,7 +54,6 @@ console.clear()
 console.print("[bold cyan]❯ Terminal Online.[/bold cyan]")
 
 chat_history = []
-exchanges = 0
 
 # ---------------- Control flags ----------------
 stop_streaming = threading.Event()
@@ -94,7 +86,6 @@ def handle_sigtstp(signum, frame):
 signal.signal(signal.SIGINT, handle_sigint)    # Ctrl+C
 signal.signal(signal.SIGTSTP, handle_sigtstp)  # Ctrl+Z
 
-
 def stream_worker(stream_gen, out_queue, stop_event):
     try:
         for chunk in stream_gen:
@@ -105,7 +96,6 @@ def stream_worker(stream_gen, out_queue, stop_event):
         out_queue.put({"__error__": str(e)})
     finally:
         out_queue.put(None)
-
 
 # ---------------- Main loop ----------------
 while True:
@@ -164,16 +154,16 @@ while True:
         console.print(f"[dim]Time: {elapsed:.2f}s[/dim]")
 
         chat_history.append({"role": "model", "content": full_response})
-        exchanges += 1
 
-        # ---------------- ASYNC MEMORY COMPRESSION ----------------
-        if exchanges >= COMPRESS_AFTER:
-            if worker_process and worker_process.is_alive():
-                pass # Already summarizing
-            else:
+        # ---------------- ASYNC MEMORY COMPRESSION (Size-Based) ----------------
+        history_text = "".join([m['content'] for m in chat_history])
+        estimated_tokens = len(history_text) // 4
+
+        if estimated_tokens >= 2500:
+            if not (worker_process and worker_process.is_alive()):
+                console.print(f"[dim]⚡ Context at ~{estimated_tokens} tokens. Background Qwen is summarizing...[/dim]")
                 worker_process = Process(target=background_summarizer, args=(child_conn, chat_history, QWEN))
                 worker_process.start()
-                exchanges = 0
 
     except EOFError:
         break
