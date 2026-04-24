@@ -5,36 +5,51 @@ import signal
 import sys
 import termios
 import atexit
+import os
+import readline
+import argparse
 from engine import ChatEngine
 from summarizer import compress
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.live import Live
-import os
-import readline
 
+# Paths
 GEMMA = "./models/gemma-4-E4B-it-Q4_K_M.gguf"
 QWEN  = "./models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
 
+# ---------------- Argument Parsing ----------------
+parser = argparse.ArgumentParser(description="LocalBro CLI")
+parser.add_argument("--fast", action="store_true", help="Use the smaller Qwen model")
+args = parser.parse_args()
+
 console = Console()
 
-# ---------------- Model selection ----------------
-if os.path.exists(GEMMA):
-    CHAT_MODEL = GEMMA
-elif os.path.exists(QWEN):
-    console.print("[yellow]Gemma not found — using Qwen 2.5 0.5B[/yellow]")
-    CHAT_MODEL = QWEN
+# ---------------- Model Selection ----------------
+if args.fast:
+    if os.path.exists(QWEN):
+        CHAT_MODEL = QWEN
+        console.print("[yellow]Fast mode enabled — using Qwen 2.5 0.5B[/yellow]")
+    else:
+        console.print(f"[red]Error: Qwen model not found at {QWEN}[/red]")
+        exit(1)
 else:
-    console.print("[red]No model found in ./models/ — run install.sh[/red]")
-    exit(1)
+    if os.path.exists(GEMMA):
+        CHAT_MODEL = GEMMA
+    elif os.path.exists(QWEN):
+        console.print("[yellow]Gemma not found — falling back to Qwen 2.5 0.5B[/yellow]")
+        CHAT_MODEL = QWEN
+    else:
+        console.print("[red]No models found in ./models/ — run install.sh[/red]")
+        exit(1)
 
 COMPRESS_AFTER = 3
 
 with console.status("[bold yellow]Loading model...", spinner="dots"):
     engine = ChatEngine(CHAT_MODEL)
 
-# ---------------- Warmup inference (CPU/GPU agnostic) ----------------
-with console.status("[bold yellow]Warming up (first inference)...", spinner="dots"):
+# ---------------- Warmup inference ----------------
+with console.status("[bold yellow]Warming up...", spinner="dots"):
     warmup_messages = [{"role": "user", "content": "Hi"}]
     warmup_stream = engine.generate_response(warmup_messages)
     for _ in range(5):
@@ -80,7 +95,6 @@ def handle_sigtstp(signum, frame):
 signal.signal(signal.SIGINT, handle_sigint)    # Ctrl+C
 signal.signal(signal.SIGTSTP, handle_sigtstp)  # Ctrl+Z
 
-
 def stream_worker(stream_gen, out_queue, stop_event):
     try:
         for chunk in stream_gen:
@@ -91,7 +105,6 @@ def stream_worker(stream_gen, out_queue, stop_event):
         out_queue.put({"__error__": str(e)})
     finally:
         out_queue.put(None)
-
 
 # ---------------- Main loop ----------------
 while True:
@@ -133,43 +146,10 @@ while True:
             chat_history.pop()
             continue
 
-        full_response = first_chunk["choices"][0]["text"]
-
         # ---------------- RESPONDING PHASE ----------------
-  #      console.print("[bold blue]assistant:[/bold blue]")
-
-   #     with Live(Markdown(full_response),
-    #              console=console,
-     #             refresh_per_second=10,
-      #            vertical_overflow="visible") as live:
-
-       #     while True:
-        #        if exit_all.is_set():
-         #           stop_streaming.set()
-          #          break
-
-           #     try:
-            #        chunk = q.get(timeout=0.1)
-             #   except queue.Empty:
-              #      if stop_streaming.is_set():
-               #         break
-                #    continue
-
-          #      if chunk is None:
-           #         break
-
-            #    if "__error__" in chunk:
-             #       console.print(f"[red]Error: {chunk['__error__']}[/red]")
-              #      break
-
-         #       full_response += chunk["choices"][0]["text"]
-          #      live.update(Markdown(full_response))
-        # ---------------- RESPONDING PHASE ----------------
-        # Use the alternate buffer (screen) to prevent scrollback corruption
         with console.screen() as screen:
-            full_response = ""
+            full_response = first_chunk["choices"][0]["text"]
             
-            # We use Live inside the alternate buffer
             with Live(Markdown(full_response), 
                       console=console, 
                       refresh_per_second=10, 
@@ -191,12 +171,9 @@ while True:
                     full_response += chunk["choices"][0]["text"]
                     live.update(Markdown(full_response))
 
-        # Once the 'with console.screen()' block ends, the terminal 
-        # automatically flips back to your main scroll history.
-        # Now we print the final, static version once.
         console.print("[bold blue]assistant:[/bold blue]")
         console.print(Markdown(full_response))
-        # ---------------- INTERRUPTION FEEDBACK ----------------
+
         if stop_streaming.is_set():
             console.print("[yellow]⚠ Response interrupted (Ctrl+C)[/yellow]")
 
@@ -215,7 +192,6 @@ while True:
             new_summary = compress(chat_history, old_summary)
             chat_history = [{"role": "context", "content": new_summary}]
             exchanges = 0
-
             console.print("[dim italic]Memory compressed ✓[/dim italic]")
 
         if exit_all.is_set():
@@ -223,7 +199,6 @@ while True:
 
     except EOFError:
         break
-
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         stop_streaming.set()
