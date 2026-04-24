@@ -3,7 +3,7 @@ import sys
 from llama_cpp import Llama
 
 class ChatEngine:
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, n_threads: int = 4, n_gpu_layers: int = -1):
         stderr_fd = sys.stderr.fileno()
         with open(os.devnull, 'w') as devnull:
             old_stderr = os.dup(stderr_fd)
@@ -13,10 +13,10 @@ class ChatEngine:
                 self.llm = Llama(
                     model_path=model_path,
                     n_ctx=4096,
-                    n_threads=4,
-                    n_threads_batch=4,
-                    n_gpu_layers=-1,
-                    verbose=False 
+                    n_threads=n_threads,
+                    n_threads_batch=n_threads,
+                    n_gpu_layers=n_gpu_layers,
+                    verbose=False
                 )
             finally:
                 os.dup2(old_stderr, stderr_fd)
