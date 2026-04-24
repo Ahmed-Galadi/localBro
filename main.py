@@ -16,7 +16,7 @@ from rich.markdown import Markdown
 from rich.live import Live
 
 GEMMA = "./models/gemma-4-E4B-it-Q4_K_M.gguf"
-QWEN  = "./models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
+SMOL_MODEL  = "./models/smollm2-1.7b-instruct-q4_k_m.gguf"
 
 console = Console()
 
@@ -55,13 +55,13 @@ def stream_worker(stream_gen, out_queue, stop_event):
     finally:
         out_queue.put(None)
 
-def qwen_result_watcher(result_recv):
+def smol_result_watcher(result_recv):
     while True:
         try:
             summary = result_recv.recv()
-            console.print("\n[bold yellow]🔄 Qwen Summary Result:[/bold yellow]")
+            console.print("\n[bold yellow]🔄 Smol Summary Result:[/bold yellow]")
             console.print(f"[bold white]{summary}[/bold white]\n")
-            qwen_busy.clear()
+            smol_busy.clear()
         except EOFError:
             break
 
@@ -71,9 +71,9 @@ if __name__ == "__main__":
     # ---------------- Model selection ----------------
     if os.path.exists(GEMMA):
         CHAT_MODEL = GEMMA
-    elif os.path.exists(QWEN):
-        console.print("[yellow]Gemma not found — using Qwen 2.5 0.5B[/yellow]")
-        CHAT_MODEL = QWEN
+    elif os.path.exists(SMOL_MODEL):
+        console.print("[yellow]Gemma not found — using Smol 1.7B[/yellow]")
+        CHAT_MODEL = SMOL_MODEL
     else:
         console.print("[red]No model found in ./models/ — run install.sh[/red]")
         exit(1)
@@ -81,21 +81,21 @@ if __name__ == "__main__":
     with console.status("[bold yellow]Loading Gemma...", spinner="dots"):
         engine = ChatEngine(CHAT_MODEL)
 
-    # ---------------- Pipes for Qwen IPC ----------------
-    # work pipe: main → Qwen (send chat_history)
-    # result pipe: Qwen → main (receive summary)
+    # ---------------- Pipes for Smol IPC ----------------
+    # work pipe: main → Smol (send chat_history)
+    # result pipe: Smol → main (receive summary)
     work_send, work_recv = Pipe()
     result_send, result_recv = Pipe()
 
-    # ---------------- Spawn Qwen at startup ----------------
-    with console.status("[bold yellow]Loading Qwen in background...", spinner="dots"):
-        qwen_process = Process(
+    # ---------------- Spawn Smol at startup ----------------
+    with console.status("[bold yellow]Loading Smol in background...", spinner="dots"):
+        smol_process = Process(
             target=persistent_summarizer,
-            args=(work_recv, result_send, QWEN),
+            args=(work_recv, result_send, SMOL_MODEL),
             daemon=True
         )
-        qwen_process.start()
-        ready_signal = result_recv.recv()  # blocks until Qwen sends "__ready__"
+        smol_process.start()
+        ready_signal = result_recv.recv()  # blocks until Smol sends "__ready__"
 
     console.clear()
     console.print("[bold cyan]❯ Terminal Online (Twin-Engine Active).[/bold cyan]")
@@ -116,10 +116,10 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTSTP, handle_sigtstp)
 
     chat_history = []
-    qwen_busy = threading.Event() # track if Qwen is currently summarizing
+    smol_busy = threading.Event() # track if Smol is currently summarizing
 
 
-    watcher = threading.Thread(target=qwen_result_watcher, args=(result_recv,), daemon=True)
+    watcher = threading.Thread(target=smol_result_watcher, args=(result_recv,), daemon=True)
     watcher.start()
     # ---------------- Main loop ----------------
     while True:
@@ -177,10 +177,10 @@ if __name__ == "__main__":
             history_text = "".join([m['content'] for m in chat_history])
             estimated_tokens = len(history_text) // 4
 
-            if estimated_tokens >= 500 and not qwen_busy.is_set():
-                console.print(f"[dim]⚡ Context at ~{estimated_tokens} tokens. Qwen is summarizing...[/dim]")
-                work_send.send(chat_history)  # Qwen is already running, just send the work
-                qwen_busy.set()
+            if estimated_tokens >= 500 and not smol_busy.is_set():
+                console.print(f"[dim]⚡ Context at ~{estimated_tokens} tokens. Smol is summarizing...[/dim]")
+                work_send.send(chat_history)  # Smol is already running, just send the work
+                smol_busy.set()
 
         except EOFError:
             break
@@ -189,9 +189,9 @@ if __name__ == "__main__":
             continue
 
     # ---------------- Shutdown ----------------
-    work_send.send(None)  # tell Qwen to exit its loop
-    qwen_process.join(timeout=5)
-    if qwen_process.is_alive():
-        qwen_process.terminate()
+    work_send.send(None)  # tell Smol to exit its loop
+    smol_process.join(timeout=5)
+    if smol_process.is_alive():
+        smol_process.terminate()
 
     console.print("\n[bold cyan]Goodbye.[/bold cyan]")

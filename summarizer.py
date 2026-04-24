@@ -16,18 +16,22 @@ def persistent_summarizer(work_conn, result_conn, model_path):
 
             # Raw prompt, no system instruction interference
             raw_prompt = (
-                f"<start_of_turn>user\n"
-                f"The user asked about these topics. Write a single compact sentence per topic using your own words. Do not copy the original text.\n\n"
+                f"<|im_start|>system\n"
+                f"You are a summarizer. Output only bullet points. No extra text.\n"
+                f"<|im_end|>\n"
+                f"<|im_start|>user\n"
+                f"Summarize each topic in one compact sentence using your own words:\n\n"
                 f"{context_text}\n"
-                f"<end_of_turn>\n"
-                f"<start_of_turn>model\n"
+                f"<|im_end|>\n"
+                f"<|im_start|>assistant\n"
                 f"- "
             )
+
             stream = mem_engine.llm(
                 raw_prompt,
                 max_tokens=384,
                 stream=True,
-                stop=["<end_of_turn>", "<eos>"]
+                stop=["<|im_end|>", "<|endoftext|>"]
             )
 
             summary = ""
