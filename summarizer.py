@@ -1,29 +1,34 @@
 from engine import ChatEngine
 
 def persistent_summarizer(work_conn, result_conn, model_path):
-    """
-    Loads Qwen once at startup, then waits in a loop for work.
-    Receives chat_history, sends back a summary.
-    """
     try:
         mem_engine = ChatEngine(model_path, n_threads=2)
-        result_conn.send("__ready__")  # signal main that Qwen is loaded
+        result_conn.send("__ready__")
 
         while True:
-            chat_history = work_conn.recv()  # blocks here until work arrives
-
-            if chat_history is None:  # shutdown signal
+            chat_history = work_conn.recv()
+            if chat_history is None:
                 break
 
             user_queries = [m['content'] for m in chat_history if m['role'] == "user"]
             context_text = "\n".join(user_queries)
             context_text = context_text[-3000:]
 
-            prompt = [
-                {"role": "user", "content": f"Summarize the following topics discussed into a logical, 3-line summary of facts:\n\n{context_text}"}
-            ]
+            # Raw prompt, no system instruction interference
+            raw_prompt = (
+                f"<start_of_turn>user\n"
+                f"Summarize these topics into 3 clear factual sentences:\n\n{context_text}\n"
+                f"<end_of_turn>\n"
+                f"<start_of_turn>model\n"
+            )
 
-            stream = mem_engine.generate_response(prompt)
+            stream = mem_engine.llm(
+                raw_prompt,
+                max_tokens=256,
+                stream=True,
+                stop=["<end_of_turn>", "<eos>"]
+            )
+
             summary = ""
             for chunk in stream:
                 summary += chunk["choices"][0]["text"]
@@ -31,4 +36,4 @@ def persistent_summarizer(work_conn, result_conn, model_path):
             result_conn.send(summary.strip())
 
     except Exception as e:
-        result_conn.send(f"Error during summarization: {e}")
+        result_conn.send(f"Error: {e}")
