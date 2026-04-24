@@ -61,6 +61,7 @@ def qwen_result_watcher(result_recv):
             summary = result_recv.recv()
             console.print("\n[bold yellow]🔄 Qwen Summary Result:[/bold yellow]")
             console.print(f"[bold white]{summary}[/bold white]\n")
+            qwen_busy.clear()
         except EOFError:
             break
 
@@ -115,16 +116,17 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTSTP, handle_sigtstp)
 
     chat_history = []
-    qwen_busy = False  # track if Qwen is currently summarizing
+    qwen_busy = threading.Event() # track if Qwen is currently summarizing
 
+
+    watcher = threading.Thread(target=qwen_result_watcher, args=(result_recv,), daemon=True)
+    watcher.start()
     # ---------------- Main loop ----------------
     while True:
         try:
             if exit_all.is_set():
                 break
 
-            watcher = threading.Thread(target=qwen_result_watcher, args=(result_recv,), daemon=True)
-            watcher.start()
             user_input = input("\n\033[1;32m❯ \033[0m").strip()
             if not user_input or user_input.lower() in ("exit", "quit"):
                 break
@@ -175,10 +177,10 @@ if __name__ == "__main__":
             history_text = "".join([m['content'] for m in chat_history])
             estimated_tokens = len(history_text) // 4
 
-            if estimated_tokens >= 500 and not qwen_busy:
+            if estimated_tokens >= 500 and not qwen_busy.is_set():
                 console.print(f"[dim]⚡ Context at ~{estimated_tokens} tokens. Qwen is summarizing...[/dim]")
                 work_send.send(chat_history)  # Qwen is already running, just send the work
-                qwen_busy = True
+                qwen_busy.set()
 
         except EOFError:
             break
