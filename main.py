@@ -1,28 +1,26 @@
 import time
-import threading
-import queue
 import signal
 import sys
 import termios
 import atexit
 import os
-import readline
-from multiprocessing import Process, Pipe, set_start_method
+import queue
+import threading
 
 from engine import ChatEngine
-from summarizer import persistent_summarizer
+from summarizer import summarize_blocking
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.live import Live
 
 GEMMA = "./models/gemma-4-E4B-it-Q4_K_M.gguf"
-SMOL_MODEL  = "./models/smollm2-1.7b-instruct-q4_k_m.gguf"
+SMOL_MODEL = "./models/smollm2-1.7b-instruct-q4_k_m.gguf"
 
 console = Console()
 
-# ---------------- Control flags ----------------
 stop_streaming = threading.Event()
 exit_all = threading.Event()
+
 
 def _set_echoctl(enable: bool):
     try:
@@ -36,13 +34,16 @@ def _set_echoctl(enable: bool):
     except Exception:
         pass
 
+
 def handle_sigint(signum, frame):
     stop_streaming.set()
+
 
 def handle_sigtstp(signum, frame):
     stop_streaming.set()
     exit_all.set()
     _set_echoctl(True)
+
 
 def stream_worker(stream_gen, out_queue, stop_event):
     try:
@@ -55,56 +56,29 @@ def stream_worker(stream_gen, out_queue, stop_event):
     finally:
         out_queue.put(None)
 
-def smol_result_watcher(result_recv):
-    while True:
-        try:
-            summary = result_recv.recv()
-            console.print("\n[bold yellow]🔄 Smol Summary Result:[/bold yellow]")
-            console.print(f"[bold white]{summary}[/bold white]\n")
-            smol_busy.clear()
-        except EOFError:
-            break
 
 if __name__ == "__main__":
-    set_start_method("spawn")
 
     # ---------------- Model selection ----------------
     if os.path.exists(GEMMA):
         CHAT_MODEL = GEMMA
     elif os.path.exists(SMOL_MODEL):
-        console.print("[yellow]Gemma not found — using Smol 1.7B[/yellow]")
+        console.print("[yellow]Gemma not found — using Smol[/yellow]")
         CHAT_MODEL = SMOL_MODEL
     else:
         console.print("[red]No model found in ./models/ — run install.sh[/red]")
         exit(1)
 
-    with console.status("[bold yellow]Loading Gemma...", spinner="dots"):
+    with console.status("[bold yellow]Loading model...", spinner="dots"):
         engine = ChatEngine(CHAT_MODEL)
 
-    # ---------------- Pipes for Smol IPC ----------------
-    # work pipe: main → Smol (send chat_history)
-    # result pipe: Smol → main (receive summary)
-    work_send, work_recv = Pipe()
-    result_send, result_recv = Pipe()
-
-    # ---------------- Spawn Smol at startup ----------------
-    with console.status("[bold yellow]Loading Smol in background...", spinner="dots"):
-        smol_process = Process(
-            target=persistent_summarizer,
-            args=(work_recv, result_send, SMOL_MODEL),
-            daemon=True
-        )
-        smol_process.start()
-        ready_signal = result_recv.recv()  # blocks until Smol sends "__ready__"
-
     console.clear()
-    console.print("[bold cyan]❯ Terminal Online (Twin-Engine Active).[/bold cyan]")
+    console.print("[bold cyan]❯ Terminal Online.[/bold cyan]")
 
-    # ---------------- Warmup ----------------
-    with console.status("[bold yellow]Warming up Gemma...", spinner="dots"):
-        warmup_messages = [{"role": "user", "content": "Hi"}]
-        warmup_stream = engine.generate_response(warmup_messages)
-        for chunk in warmup_stream:
+    # Warmup
+    with console.status("[bold yellow]Warming up...", spinner="dots"):
+        warmup = [{"role": "user", "content": "Hi"}]
+        for _ in engine.generate_response(warmup):
             pass
 
     console.clear()
@@ -116,11 +90,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTSTP, handle_sigtstp)
 
     chat_history = []
-    smol_busy = threading.Event() # track if Smol is currently summarizing
 
-
-    watcher = threading.Thread(target=smol_result_watcher, args=(result_recv,), daemon=True)
-    watcher.start()
     # ---------------- Main loop ----------------
     while True:
         try:
@@ -132,6 +102,7 @@ if __name__ == "__main__":
                 break
 
             chat_history.append({"role": "user", "content": user_input})
+
             stop_streaming.clear()
             q = queue.Queue(maxsize=200)
             start_time = time.time()
@@ -140,7 +111,7 @@ if __name__ == "__main__":
             worker = threading.Thread(target=stream_worker, args=(stream, q, stop_streaming), daemon=True)
             worker.start()
 
-            # ---------------- THINKING PHASE ----------------
+            # ---------------- Thinking ----------------
             with console.status("[bold yellow]Thinking...[/bold yellow]", spinner="dots"):
                 first_chunk = q.get()
 
@@ -148,20 +119,22 @@ if __name__ == "__main__":
                 chat_history.pop()
                 continue
 
-            # ---------------- RESPONDING PHASE ----------------
-            with console.screen() as screen:
+            # ---------------- Streaming output ----------------
+            with console.screen():
                 full_response = first_chunk["choices"][0]["text"]
-                with Live(Markdown(full_response), console=console, refresh_per_second=10, vertical_overflow="visible") as live:
+
+                with Live(Markdown(full_response), console=console, refresh_per_second=10) as live:
                     while True:
-                        if exit_all.is_set():
-                            stop_streaming.set()
-                            break
                         try:
                             chunk = q.get(timeout=0.1)
                         except queue.Empty:
-                            if stop_streaming.is_set(): break
+                            if stop_streaming.is_set():
+                                break
                             continue
-                        if chunk is None: break
+
+                        if chunk is None:
+                            break
+
                         full_response += chunk["choices"][0]["text"]
                         live.update(Markdown(full_response))
 
@@ -173,25 +146,48 @@ if __name__ == "__main__":
 
             chat_history.append({"role": "model", "content": full_response})
 
-            # ---------------- ASYNC MEMORY COMPRESSION ----------------
+            # ---------------- MEMORY COMPACTION ----------------
             history_text = "".join([m['content'] for m in chat_history])
             estimated_tokens = len(history_text) // 4
 
-            if estimated_tokens >= 500 and not smol_busy.is_set():
-                console.print(f"[dim]⚡ Context at ~{estimated_tokens} tokens. Smol is summarizing...[/dim]")
-                work_send.send(chat_history)  # Smol is already running, just send the work
-                smol_busy.set()
+            if estimated_tokens >= 500:
+                console.print(f"[dim]⚡ Context at ~{estimated_tokens} tokens. Summarizing...[/dim]")
+
+                summary = summarize_blocking(chat_history, SMOL_MODEL)
+
+                console.print(f"[bold green]✅ Memory compacted.[/bold green]")
+                console.print(f"[dim]💾 Summary content: {summary}[/dim]")
+
+                # Keep summary + last exchange
+                last_user = None
+                last_model = None
+
+                for msg in reversed(chat_history):
+                    if msg['role'] == "model":
+                        last_model = msg
+                    elif msg['role'] == "user":
+                        last_user = msg
+                        break
+
+                new_history = []
+
+                if summary:
+                    new_history.append({
+                        "role": "context",
+                        "content": summary
+                    })
+
+                if last_user:
+                    new_history.append(last_user)
+
+                if last_model:
+                    new_history.append(last_model)
+
+                chat_history = new_history
 
         except EOFError:
             break
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
-            continue
-
-    # ---------------- Shutdown ----------------
-    work_send.send(None)  # tell Smol to exit its loop
-    smol_process.join(timeout=5)
-    if smol_process.is_alive():
-        smol_process.terminate()
 
     console.print("\n[bold cyan]Goodbye.[/bold cyan]")

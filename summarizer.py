@@ -1,44 +1,46 @@
 from engine import ChatEngine
 
-def persistent_summarizer(work_conn, result_conn, model_path):
-    try:
-        mem_engine = ChatEngine(model_path, n_threads=2)
-        result_conn.send("__ready__")
+def summarize_blocking(chat_history, model_path):
+    # Note: Loading the model from disk every time this function is called is highly inefficient. 
+    # You should load this once globally or pass the engine instance to avoid RAM thrashing.
+    mem_engine = ChatEngine(model_path, n_threads=2)
 
-        while True:
-            chat_history = work_conn.recv()
-            if chat_history is None:
-                break
+    # 1. Build and ACTUALLY use the conversation text
+    conversation_lines = []
+    for m in chat_history:
+        if m['role'] == "user":
+            prefix = "User:"
+        elif m['role'] == "model":
+            prefix = "Assistant:"
+        else:
+            prefix = "Memory:"
+        conversation_lines.append(f"{prefix} {m['content']}")
 
-            user_queries = [m['content'] for m in chat_history if m['role'] == "user"]
-            context_text = "\n".join(user_queries)
-            context_text = context_text[:3000:]
+    # Use the last 2000 characters of the properly formatted dialogue
+    context_text = "\n".join(conversation_lines)[-2000:]
 
-            # Raw prompt, no system instruction interference
-            raw_prompt = (
-                f"<|im_start|>system\n"
-                f"You are a summarizer. Output only bullet points. No extra text.\n"
-                f"<|im_end|>\n"
-                f"<|im_start|>user\n"
-                f"Summarize each topic in one compact sentence using your own words:\n\n"
-                f"{context_text}\n"
-                f"<|im_end|>\n"
-                f"<|im_start|>assistant\n"
-                f"- "
-            )
+    # 2. Use ChatML tags for SmolLM2 and strictly delimit the context
+    prompt = (
+        "<|im_start|>system\n"
+        "You are a strict summarization engine. Do NOT answer questions. ONLY summarize the text provided.<|im_end|>\n"
+        "<|im_start|>user\n"
+        "Summarize the conversation below in ONE sentence (max 15 words).\n\n"
+        "--- CONVERSATION START ---\n"
+        f"{context_text}\n"
+        "--- CONVERSATION END ---\n"
+        "<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    
+    stream = mem_engine.llm(
+        prompt,
+        max_tokens=32,
+        stream=True,
+        stop=["<|im_end|>", "<eos>"] # Ensure it stops on SmolLM's end token
+    )
 
-            stream = mem_engine.llm(
-                raw_prompt,
-                max_tokens=384,
-                stream=True,
-                stop=["<|im_end|>", "<|endoftext|>"]
-            )
+    summary = ""
+    for chunk in stream:
+        summary += chunk["choices"][0]["text"]
 
-            summary = ""
-            for chunk in stream:
-                summary += chunk["choices"][0]["text"]
-
-            result_conn.send(summary.strip())
-
-    except Exception as e:
-        result_conn.send(f"Error: {e}")
+    return summary.strip()
